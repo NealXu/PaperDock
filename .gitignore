@@ -1,0 +1,15 @@
+# Build output
+app/dist/
+app/build-check/
+release/wpf/
+
+# Optional large OCR payload
+release/ocr/*.ocrpack.zip
+
+# Local test and runtime output
+tmp/
+**/__pycache__/
+**/.pytest_cache/
+*.log
+*.tmp
+*.bak

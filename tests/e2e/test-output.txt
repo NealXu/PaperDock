@@ -1,0 +1,23 @@
+============================= test session starts =============================
+platform win32 -- Python 3.12.10, pytest-9.1.1, pluggy-1.6.0 -- C:\Users\xuqi\AppData\Local\Programs\Python\Python312\python.exe
+cachedir: .pytest_cache
+rootdir: D:\Codes\innovation\PaperDock\tests\e2e
+configfile: pytest.ini
+testpaths: .
+plugins: anyio-4.14.2, asyncio-1.4.0, timeout-2.4.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+timeout: 300.0s
+timeout method: thread
+timeout func_only: False
+collecting ... collected 8 items
+
+test_end_to_end.py::test_split_modes_searchable_and_watermark PASSED
+test_end_to_end.py::test_merge_with_per_file_ranges PASSED
+test_end_to_end.py::test_convert_to_word_excel_and_powerpoint PASSED
+test_end_to_end.py::test_import_offline_ocr_pack_and_searchable_output PASSED
+test_end_to_end.py::test_rejects_invalid_ocr_pack PASSED
+test_end_to_end.py::test_cancel_stops_long_searchable_job PASSED
+test_end_to_end.py::test_invalid_and_encrypted_pdf_fail_cleanly PASSED
+test_end_to_end.py::test_scanned_pdf_to_word_uses_ocr PASSED
+
+======================== 8 passed in 192.13s (0:03:12) ========================

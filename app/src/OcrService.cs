@@ -24,6 +24,10 @@ namespace PaperDock
 
     internal static class OcrPackManager
     {
+        private const long MaxPackBytes = 256L * 1024 * 1024;
+        private const int MaxPackFiles = 10000;
+        private const string ManifestName = "ocrpack.json";
+
         private static readonly HashSet<string> AllowedExtensions = new HashSet<string>(
             new[]
             {
@@ -45,11 +49,13 @@ namespace PaperDock
                 }
                 try
                 {
-                    result.Add(new InstalledOcrPack
+                    var pack = new InstalledOcrPack
                     {
                         Directory = directory,
                         Manifest = ReadManifest(manifestPath)
-                    });
+                    };
+                    ValidateInstalledPack(pack);
+                    result.Add(pack);
                 }
                 catch
                 {
@@ -68,7 +74,7 @@ namespace PaperDock
 
             using (var archive = ZipFile.OpenRead(zipPath))
             {
-                var manifestEntry = archive.GetEntry("ocrpack.json");
+                var manifestEntry = archive.GetEntry(ManifestName);
                 if (manifestEntry == null)
                 {
                     throw new InvalidDataException("OCR 包缺少 ocrpack.json。");
@@ -82,10 +88,30 @@ namespace PaperDock
                 }
                 ValidateManifest(manifest);
 
+                var files = archive.Entries.Where(entry => !string.IsNullOrEmpty(entry.Name)).ToList();
+                if (files.Count > MaxPackFiles)
+                {
+                    throw new InvalidDataException("OCR 包文件数量超过限制。");
+                }
+                var totalBytes = files.Aggregate(
+                    0L,
+                    (total, entry) => total > MaxPackBytes - entry.Length
+                        ? MaxPackBytes + 1
+                        : total + entry.Length);
+                if (totalBytes > MaxPackBytes)
+                {
+                    throw new InvalidDataException("OCR 包解压后超过 256 MB 上限。");
+                }
+                var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var entry in archive.Entries)
                 {
                     ValidateEntry(entry);
+                    if (!string.IsNullOrEmpty(entry.Name) && !names.Add(NormalizePath(entry.FullName)))
+                    {
+                        throw new InvalidDataException("OCR 包包含重复文件：" + entry.FullName);
+                    }
                 }
+                ValidateFileList(manifest, files.Select(entry => NormalizePath(entry.FullName)));
 
                 var packDirectory = Path.Combine(
                     AppPaths.OcrPackDirectory,
@@ -113,7 +139,7 @@ namespace PaperDock
                     var installed = new InstalledOcrPack
                     {
                         Directory = packDirectory,
-                        Manifest = ReadManifest(Path.Combine(packDirectory, "ocrpack.json"))
+                        Manifest = ReadManifest(Path.Combine(packDirectory, ManifestName))
                     };
                     ValidateInstalledPack(installed);
                     return installed;
@@ -152,7 +178,7 @@ namespace PaperDock
             {
                 throw new InvalidDataException("OCR 包清单缺少必要字段。");
             }
-            if (!manifest.Engine.Equals("tesseract", StringComparison.OrdinalIgnoreCase))
+            if (!string.Equals(manifest.Engine, "tesseract", StringComparison.OrdinalIgnoreCase))
             {
                 throw new InvalidDataException("当前只支持 tesseract OCR 包。");
             }
@@ -160,19 +186,50 @@ namespace PaperDock
             {
                 throw new InvalidDataException("OCR 包入口必须是 tesseract.exe。");
             }
-            if (string.IsNullOrWhiteSpace(manifest.EntrySha256) || manifest.EntrySha256.Length != 64)
+            if (!IsSha256(manifest.EntrySha256))
             {
                 throw new InvalidDataException("OCR 包清单缺少 tesseract.exe 的 SHA-256。");
-            }
-            if (string.IsNullOrWhiteSpace(manifest.DataDirectory) ||
-                manifest.DataDirectory.Contains(".."))
-            {
-                throw new InvalidDataException("OCR 包数据目录不合法。");
             }
             if (!manifest.Id.All(character =>
                 char.IsLetterOrDigit(character) || character == '.' || character == '-' || character == '_'))
             {
                 throw new InvalidDataException("OCR 包 id 只能包含字母、数字、点、横线和下划线。");
+            }
+            if (string.IsNullOrWhiteSpace(manifest.DataDirectory) ||
+                !IsSafeRelativePath(manifest.DataDirectory))
+            {
+                throw new InvalidDataException("OCR 包数据目录不合法。");
+            }
+            if (manifest.Files == null || manifest.Files.Count == 0)
+            {
+                throw new InvalidDataException("OCR 包缺少完整文件清单。");
+            }
+
+            var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var file in manifest.Files)
+            {
+                if (file == null || string.IsNullOrWhiteSpace(file.Path) || !IsSafeRelativePath(file.Path))
+                {
+                    throw new InvalidDataException("OCR 包文件路径不合法。");
+                }
+                var path = NormalizePath(file.Path);
+                if (string.Equals(path, ManifestName, StringComparison.OrdinalIgnoreCase) ||
+                    !paths.Add(path))
+                {
+                    throw new InvalidDataException("OCR 包文件清单包含重复项或清单文件本身。");
+                }
+                if (!IsSha256(file.Sha256))
+                {
+                    throw new InvalidDataException("OCR 包文件缺少合法 SHA-256：" + path);
+                }
+            }
+
+            var entryFile = manifest.Files.FirstOrDefault(file =>
+                string.Equals(NormalizePath(file.Path), manifest.Entry, StringComparison.OrdinalIgnoreCase));
+            if (entryFile == null ||
+                !string.Equals(entryFile.Sha256, manifest.EntrySha256, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("OCR 包入口程序的 SHA-256 与文件清单不一致。");
             }
         }
 
@@ -195,19 +252,85 @@ namespace PaperDock
             }
         }
 
-        private static void ValidateInstalledPack(InstalledOcrPack pack)
+        internal static void ValidateInstalledPack(InstalledOcrPack pack)
         {
-            var executable = Path.Combine(pack.Directory, pack.Manifest.Entry);
-            var dataDirectory = Path.Combine(pack.Directory, pack.Manifest.DataDirectory);
+            ValidateManifest(pack.Manifest);
+            var executable = ResolveInside(pack.Directory, pack.Manifest.Entry);
+            var dataDirectory = ResolveInside(pack.Directory, pack.Manifest.DataDirectory);
             if (!File.Exists(executable) || !Directory.Exists(dataDirectory))
             {
                 throw new InvalidDataException("OCR 包缺少入口程序或语言数据目录。");
             }
-            var actualHash = Sha256(executable);
-            if (!string.Equals(actualHash, pack.Manifest.EntrySha256, StringComparison.OrdinalIgnoreCase))
+
+            var installedFiles = Directory.GetFiles(pack.Directory, "*", SearchOption.AllDirectories)
+                .Where(path => !string.Equals(
+                    Path.GetFileName(path),
+                    ManifestName,
+                    StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            if (installedFiles.Count != pack.Manifest.Files.Count)
             {
-                throw new InvalidDataException("OCR 包入口程序校验失败。");
+                throw new InvalidDataException("OCR 包文件数量与清单不一致。");
             }
+            foreach (var file in pack.Manifest.Files)
+            {
+                var path = ResolveInside(pack.Directory, file.Path);
+                if (!File.Exists(path) ||
+                    !string.Equals(Sha256(path), file.Sha256, StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new InvalidDataException("OCR 包文件校验失败：" + file.Path);
+                }
+            }
+        }
+
+        private static void ValidateFileList(OcrPack manifest, IEnumerable<string> archiveFiles)
+        {
+            var actual = new HashSet<string>(
+                archiveFiles.Where(path => !string.Equals(path, ManifestName, StringComparison.OrdinalIgnoreCase)),
+                StringComparer.OrdinalIgnoreCase);
+            var expected = new HashSet<string>(
+                manifest.Files.Select(file => NormalizePath(file.Path)),
+                StringComparer.OrdinalIgnoreCase);
+            if (!actual.SetEquals(expected))
+            {
+                throw new InvalidDataException("OCR 包实际文件与清单不一致。");
+            }
+        }
+
+        private static bool IsSafeRelativePath(string path)
+        {
+            var normalized = NormalizePath(path);
+            return !string.IsNullOrWhiteSpace(normalized) &&
+                !Path.IsPathRooted(normalized) &&
+                normalized.Split('/').All(part => part.Length > 0 && part != "." && part != "..");
+        }
+
+        private static bool IsSha256(string value)
+        {
+            return !string.IsNullOrWhiteSpace(value) &&
+                value.Length == 64 &&
+                value.All(character =>
+                    (character >= '0' && character <= '9') ||
+                    (character >= 'a' && character <= 'f') ||
+                    (character >= 'A' && character <= 'F'));
+        }
+
+        private static string ResolveInside(string root, string relativePath)
+        {
+            var fullRoot = Path.GetFullPath(root) + Path.DirectorySeparatorChar;
+            var target = Path.GetFullPath(Path.Combine(
+                root,
+                NormalizePath(relativePath).Replace('/', Path.DirectorySeparatorChar)));
+            if (!target.StartsWith(fullRoot, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new InvalidDataException("OCR 包文件路径越界：" + relativePath);
+            }
+            return target;
+        }
+
+        private static string NormalizePath(string path)
+        {
+            return (path ?? string.Empty).Replace('\\', '/');
         }
 
         public static string Sha256(string path)
@@ -240,6 +363,7 @@ namespace PaperDock
             {
                 throw new InvalidOperationException("已选择的离线 OCR 包不存在，请在设置中重新选择。");
             }
+            OcrPackManager.ValidateInstalledPack(pack);
             return RecognizeWithTesseract(pack, imageDirectory, cancellationToken);
         }
 

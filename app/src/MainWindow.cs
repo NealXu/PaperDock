@@ -27,7 +27,11 @@ namespace PaperDock
         private TextBlock _pageTitle;
         private TextBlock _pageSubtitle;
         private TextBlock _statusText;
+        private Border _ocrSideDot;
+        private TextBlock _ocrSideLabel;
         private TextBlock _ocrSideText;
+        private Border _headerOcrDot;
+        private TextBlock _headerOcrLabel;
         private Button _headerAction;
         private Button _cancelButton;
         private CancellationTokenSource _jobCancellation;
@@ -89,11 +93,12 @@ namespace PaperDock
         private StackPanel _ocrPackList;
         private ComboBox _ocrChoice;
         private TextBox _defaultOutputDirectory;
+        private bool _systemOcrAvailable;
 
         public MainWindow(string startupFile)
         {
             _settings = AppSettingsStore.Load();
-            Directory.CreateDirectory(_settings.OutputDirectory);
+            PrepareOutputDirectory();
             _ocrPacks = OcrPackManager.List().ToList();
 
             Title = "纸坞";
@@ -209,17 +214,19 @@ namespace PaperDock
 
             var footer = new StackPanel { Margin = new Thickness(8, 8, 8, 5) };
             var state = new StackPanel { Orientation = Orientation.Horizontal };
-            state.Children.Add(new Border
+            _ocrSideDot = new Border
             {
                 Width = 7,
                 Height = 7,
-                Background = Ui.Success,
+                Background = Ui.Muted,
                 CornerRadius = new CornerRadius(4),
                 Margin = new Thickness(0, 0, 7, 0)
-            });
-            state.Children.Add(Ui.Text("OCR 可用", 11, FontWeights.SemiBold));
+            };
+            state.Children.Add(_ocrSideDot);
+            _ocrSideLabel = Ui.Text("正在检测 OCR", 11, FontWeights.SemiBold);
+            state.Children.Add(_ocrSideLabel);
             footer.Children.Add(state);
-            _ocrSideText = Ui.Text("正在检测系统 OCR", 10, FontWeights.Normal, Ui.Muted);
+            _ocrSideText = Ui.Text("正在检测系统能力", 10, FontWeights.Normal, Ui.Muted);
             _ocrSideText.Margin = new Thickness(14, 2, 0, 0);
             footer.Children.Add(_ocrSideText);
             Grid.SetRow(footer, 2);
@@ -307,6 +314,15 @@ namespace PaperDock
                 Orientation = Orientation.Horizontal,
                 VerticalAlignment = VerticalAlignment.Center
             };
+            _headerOcrDot = new Border
+            {
+                Width = 7,
+                Height = 7,
+                Background = Ui.Muted,
+                CornerRadius = new CornerRadius(4),
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            _headerOcrLabel = Ui.Text("检测 OCR", 11, FontWeights.Normal, Ui.Muted);
             var ocr = new Border
             {
                 Height = 34,
@@ -321,15 +337,8 @@ namespace PaperDock
                     Orientation = Orientation.Horizontal,
                     Children =
                     {
-                        new Border
-                        {
-                            Width = 7,
-                            Height = 7,
-                            Background = Ui.Success,
-                            CornerRadius = new CornerRadius(4),
-                            Margin = new Thickness(0, 0, 8, 0)
-                        },
-                        Ui.Text("系统 OCR", 11, FontWeights.Normal, Ui.Muted)
+                        _headerOcrDot,
+                        _headerOcrLabel
                     }
                 }
             };
@@ -1752,7 +1761,11 @@ namespace PaperDock
             };
             importRow.Children.Add(openFolder);
             ocrCardContent.Children.Add(importRow);
-            var importHint = Ui.Text("支持 *.ocrpack.zip；当前只接受带 SHA-256 的 Tesseract 包。", 9, FontWeights.Normal, Ui.Muted);
+            var importHint = Ui.Text(
+                "支持 *.ocrpack.zip；导入时校验完整文件清单、逐文件 SHA-256 和 256 MB 解压上限。",
+                9,
+                FontWeights.Normal,
+                Ui.Muted);
             importHint.Margin = new Thickness(0, 9, 0, 0);
             ocrCardContent.Children.Add(importHint);
             left.Children.Add(Ui.Card(ocrCardContent, 22, new Thickness(0, 0, 0, 16)));
@@ -1804,6 +1817,7 @@ namespace PaperDock
                 _settings.DefaultOcr = choice.Id == "system" ? "system" : choice.Engine;
                 _settings.ActiveOcrPackId = choice.Id == "system" ? string.Empty : choice.Id;
                 AppSettingsStore.Save(_settings);
+                UpdateOcrIndicators();
             };
             right.Children.Add(_ocrChoice);
             var note = Ui.Text("当前版本不自动联网。没有系统 OCR 时，请导入合法授权的离线包。", 10, FontWeights.Normal, Ui.Muted);
@@ -1832,27 +1846,36 @@ namespace PaperDock
             try
             {
                 var probe = await Task.Run(() => SystemPdfService.ProbeOcr());
-                var available = probe != null && probe.available;
-                _systemOcrState.Text = available
-                    ? "简体中文可用 · 当前默认 · 无需额外空间"
-                    : "不可用 · 请导入离线 OCR 包";
-                _systemOcrState.Foreground = available ? Ui.Success : Ui.Brush("#A15B00");
-                _ocrSideText.Text = available ? "Windows 系统识别" : "需要导入 OCR 包";
+                _systemOcrAvailable = probe != null && probe.available;
+                _systemOcrState.Text = _systemOcrAvailable
+                    ? "简体中文可用 · 无需额外空间"
+                    : "简体中文不可用 · 请导入离线 OCR 包";
+                _systemOcrState.Foreground = _systemOcrAvailable ? Ui.Success : Ui.Brush("#A15B00");
             }
             catch (Exception exception)
             {
+                _systemOcrAvailable = false;
                 _systemOcrState.Text = "检测失败";
+                _systemOcrState.Foreground = Ui.Brush("#A15B00");
                 _ocrSideText.Text = exception.Message;
             }
             RefreshOcrChoice();
             RefreshOcrPackList();
+            UpdateOcrIndicators();
         }
 
         private void RefreshOcrChoice()
         {
             if (_ocrChoice == null) return;
             _ocrChoice.Items.Clear();
-            _ocrChoice.Items.Add(new OcrChoice { Id = "system", Engine = "system", Label = "Windows 系统 OCR" });
+            _ocrChoice.Items.Add(new OcrChoice
+            {
+                Id = "system",
+                Engine = "system",
+                Label = _systemOcrAvailable
+                    ? "Windows 系统 OCR"
+                    : "Windows 系统 OCR（当前不可用）"
+            });
             foreach (var pack in _ocrPacks)
             {
                 _ocrChoice.Items.Add(new OcrChoice
@@ -1871,6 +1894,31 @@ namespace PaperDock
             {
                 _ocrChoice.SelectedIndex = 0;
             }
+            UpdateOcrIndicators();
+        }
+
+        private void UpdateOcrIndicators()
+        {
+            if (_ocrSideLabel == null || _headerOcrLabel == null) return;
+
+            var activePack = _ocrPacks.FirstOrDefault(item =>
+                !string.Equals(_settings.DefaultOcr, "system", StringComparison.OrdinalIgnoreCase) &&
+                string.Equals(
+                    item.Manifest.Id,
+                    _settings.ActiveOcrPackId,
+                    StringComparison.OrdinalIgnoreCase));
+            var available = _systemOcrAvailable || activePack != null;
+            var statusBrush = available ? Ui.Success : Ui.Brush("#A15B00");
+            _ocrSideDot.Background = statusBrush;
+            _headerOcrDot.Background = statusBrush;
+            _ocrSideLabel.Text = available ? "OCR 可用" : "OCR 不可用";
+            _ocrSideLabel.Foreground = available ? Ui.Ink : Ui.Brush("#8A4B00");
+            _headerOcrLabel.Text = activePack != null
+                ? "离线 OCR"
+                : _systemOcrAvailable ? "系统 OCR" : "OCR 不可用";
+            _ocrSideText.Text = activePack != null
+                ? activePack.DisplayName
+                : _systemOcrAvailable ? "Windows 系统识别" : "请导入离线 OCR 包";
         }
 
         private void RefreshOcrPackList()
@@ -1940,6 +1988,7 @@ namespace PaperDock
                         _ocrPacks = OcrPackManager.List().ToList();
                         RefreshOcrPackList();
                         RefreshOcrChoice();
+                        UpdateOcrIndicators();
                     }
                     catch (Exception exception)
                     {
@@ -1971,6 +2020,7 @@ namespace PaperDock
                 AppSettingsStore.Save(_settings);
                 RefreshOcrPackList();
                 RefreshOcrChoice();
+                UpdateOcrIndicators();
                 SetStatus("OCR 包已导入");
             }
             catch (Exception exception)
@@ -2011,6 +2061,23 @@ namespace PaperDock
                 SelectedPath = Directory.Exists(initial) ? initial : _settings.OutputDirectory
             };
             return dialog.ShowDialog() == System.Windows.Forms.DialogResult.OK ? dialog.SelectedPath : null;
+        }
+
+        private void PrepareOutputDirectory()
+        {
+            if (string.IsNullOrWhiteSpace(_settings.OutputDirectory))
+            {
+                _settings.OutputDirectory = new AppSettings().OutputDirectory;
+            }
+            try
+            {
+                Directory.CreateDirectory(_settings.OutputDirectory);
+            }
+            catch
+            {
+                _settings.OutputDirectory = new AppSettings().OutputDirectory;
+                try { Directory.CreateDirectory(_settings.OutputDirectory); } catch { }
+            }
         }
 
         private static string HumanSize(long bytes)

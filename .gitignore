@@ -1,6 +1,7 @@
 # Build output
 app/dist/
 app/build-check/
+tests/unit/.build/
 release/wpf/
 
 # Optional large OCR payload

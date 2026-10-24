@@ -225,6 +225,13 @@ namespace PaperDock
         public string EntrySha256 { get; set; }
         public string Language { get; set; }
         public string DataDirectory { get; set; }
+        public List<OcrPackFile> Files { get; set; } = new List<OcrPackFile>();
+    }
+
+    internal sealed class OcrPackFile
+    {
+        public string Path { get; set; }
+        public string Sha256 { get; set; }
     }
 
     internal sealed class AppSettings

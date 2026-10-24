@@ -139,6 +139,14 @@ namespace PaperDock
                     outputPaths.Add(finalPath);
                 }
             }
+            catch
+            {
+                foreach (var outputPath in outputPaths)
+                {
+                    TryDeleteFile(outputPath);
+                }
+                throw;
+            }
             finally
             {
                 TryDeleteDirectory(tempRoot);
@@ -160,38 +168,41 @@ namespace PaperDock
             Directory.CreateDirectory(outputDirectory);
             var finalPath = FileSafety.UniquePath(request.OutputPath);
             var tempPath = FileSafety.TempPathFor(finalPath);
-            var output = new PdfDocument();
-
             try
             {
-                var itemNumber = 0;
-                foreach (var item in request.Items)
+                using (var output = new PdfDocument())
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    itemNumber++;
-                    progress.Report("正在合并第 " + itemNumber + " / " + request.Items.Count + " 份文件…");
-                    if (!File.Exists(item.Path))
-                    {
-                        throw new FileNotFoundException("找不到待合并文件。", item.Path);
-                    }
-
-                    var input = PdfReader.Open(item.Path, PdfDocumentOpenMode.Import);
-                    var selected = item.SelectedPages();
-                    foreach (var pageIndex in selected)
+                    var itemNumber = 0;
+                    foreach (var item in request.Items)
                     {
                         cancellationToken.ThrowIfCancellationRequested();
-                        var page = output.AddPage(input.Pages[pageIndex]);
-                        DrawWatermark(page, request.Watermark);
-                    }
-                }
+                        itemNumber++;
+                        progress.Report("正在合并第 " + itemNumber + " / " + request.Items.Count + " 份文件…");
+                        if (!File.Exists(item.Path))
+                        {
+                            throw new FileNotFoundException("找不到待合并文件。", item.Path);
+                        }
 
-                if (output.PageCount == 0)
-                {
-                    throw new InvalidOperationException("合并结果为空。");
+                        using (var input = PdfReader.Open(item.Path, PdfDocumentOpenMode.Import))
+                        {
+                            var selected = item.SelectedPages();
+                            foreach (var pageIndex in selected)
+                            {
+                                cancellationToken.ThrowIfCancellationRequested();
+                                var page = output.AddPage(input.Pages[pageIndex]);
+                                DrawWatermark(page, request.Watermark);
+                            }
+                        }
+                    }
+
+                    if (output.PageCount == 0)
+                    {
+                        throw new InvalidOperationException("合并结果为空。");
+                    }
+                    output.Save(tempPath);
+                    FileSafety.Commit(tempPath, finalPath);
+                    return finalPath;
                 }
-                output.Save(tempPath);
-                FileSafety.Commit(tempPath, finalPath);
-                return finalPath;
             }
             catch
             {
@@ -243,14 +254,16 @@ namespace PaperDock
             var tempPath = FileSafety.TempPathFor(finalPath);
             try
             {
-                var input = PdfReader.Open(sourcePath, PdfDocumentOpenMode.Import);
-                var output = new PdfDocument();
-                foreach (var pageIndex in pageIndexes)
+                using (var input = PdfReader.Open(sourcePath, PdfDocumentOpenMode.Import))
+                using (var output = new PdfDocument())
                 {
-                    var page = output.AddPage(input.Pages[pageIndex]);
-                    DrawWatermark(page, watermark);
+                    foreach (var pageIndex in pageIndexes)
+                    {
+                        var page = output.AddPage(input.Pages[pageIndex]);
+                        DrawWatermark(page, watermark);
+                    }
+                    output.Save(tempPath);
                 }
-                output.Save(tempPath);
                 FileSafety.Commit(tempPath, finalPath);
             }
             catch
@@ -271,29 +284,31 @@ namespace PaperDock
             var tempPath = FileSafety.TempPathFor(finalPath);
             try
             {
-                var output = new PdfDocument();
-                foreach (var pageIndex in pageIndexes)
+                using (var output = new PdfDocument())
                 {
-                    var size = sourcePages[pageIndex];
-                    var page = output.AddPage();
-                    page.Width = XUnit.FromPoint(size.Width);
-                    page.Height = XUnit.FromPoint(size.Height);
-                    using (var graphics = XGraphics.FromPdfPage(page))
-                    using (var image = XImage.FromFile(images[pageIndex]))
+                    foreach (var pageIndex in pageIndexes)
                     {
-                        graphics.DrawImage(image, 0, 0, size.Width, size.Height);
-                        if (ocr != null)
+                        var size = sourcePages[pageIndex];
+                        var page = output.AddPage();
+                        page.Width = XUnit.FromPoint(size.Width);
+                        page.Height = XUnit.FromPoint(size.Height);
+                        using (var graphics = XGraphics.FromPdfPage(page))
+                        using (var image = XImage.FromFile(images[pageIndex]))
                         {
-                            var ocrPage = FindOcrPage(ocr, pageIndex);
-                            if (ocrPage != null)
+                            graphics.DrawImage(image, 0, 0, size.Width, size.Height);
+                            if (ocr != null)
                             {
-                                DrawInvisibleText(graphics, ocrPage, size);
+                                var ocrPage = FindOcrPage(ocr, pageIndex);
+                                if (ocrPage != null)
+                                {
+                                    DrawInvisibleText(graphics, ocrPage, size);
+                                }
                             }
+                            DrawWatermark(graphics, page, watermark);
                         }
-                        DrawWatermark(graphics, page, watermark);
                     }
+                    output.Save(tempPath);
                 }
-                output.Save(tempPath);
                 FileSafety.Commit(tempPath, finalPath);
             }
             catch

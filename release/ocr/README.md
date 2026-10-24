@@ -9,14 +9,16 @@
 - Tesseract 5.5 x64
 - 简体中文 `chi_sim.traineddata`
 - 英文 `eng.traineddata`
-- 入口 SHA-256 校验
+- 全部运行文件和模型清单
+- 逐文件 SHA-256 校验
+- 256 MB 解压体积上限
 
 大小：6.60 MiB
 
 SHA-256：
 
 ```text
-9D09E83DC2F394207106E739F7832EDE9308388288D2315396D5B95FBB98A015
+9A92566F10D7BC24D20BDEF973C5DD981A09A1FBAF623A23BA077910C293011C
 ```
 
 来源与许可：

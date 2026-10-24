@@ -125,4 +125,8 @@ class AppHelpers:
     @staticmethod
     def screenshot(window, path: Path):
         path.parent.mkdir(parents=True, exist_ok=True)
-        window.capture_as_image().save(path)
+        try:
+            window.capture_as_image().save(path)
+        except OSError:
+            # Some remote or locked desktop sessions cannot capture the screen.
+            pass

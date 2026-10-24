@@ -199,7 +199,15 @@ namespace PaperDock
             {
                 return new AppSettings();
             }
-            return Json.Deserialize<AppSettings>(File.ReadAllText(AppPaths.SettingsFile, Encoding.UTF8));
+            try
+            {
+                return Json.Deserialize<AppSettings>(File.ReadAllText(AppPaths.SettingsFile, Encoding.UTF8));
+            }
+            catch
+            {
+                // A damaged preference file must not prevent the application from starting.
+                return new AppSettings();
+            }
         }
 
         public static void Save(AppSettings settings)

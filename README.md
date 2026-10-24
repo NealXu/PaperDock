@@ -14,8 +14,8 @@ PaperDock 提供拆分、合并、扫描型 PDF、可搜索 PDF、水印和 Offi
 
 安装包和便携版生成在：
 
-- `release\wpf\PaperDock-Setup-0.2.0.exe`
-- `release\wpf\PaperDock-Portable-0.2.0.zip`
+- `release\wpf\PaperDock-Setup-0.2.1.exe`
+- `release\wpf\PaperDock-Portable-0.2.1.zip`
 
 可选离线 OCR 包：
 
@@ -33,6 +33,7 @@ PaperDock 提供拆分、合并、扫描型 PDF、可搜索 PDF、水印和 Offi
 - Windows 系统 OCR。
 - Tesseract 离线 OCR 包。
 - 进度状态、任务取消、输出文件防覆盖。
+- OCR 包全文件校验、解压体积限制、取消后清理本次拆分输出。
 
 不包含 PDF→CAD、CAD→PDF、CAJ→PDF、PDF 加密和批量队列。
 
@@ -58,7 +59,7 @@ python -m pip install -r requirements.txt
 python -m pytest -s
 ```
 
-当前 8 项 GUI 端到端测试全部通过。详见：
+测试入口包含 8 个 GUI 端到端测试函数和 1 组核心逻辑自检。2026-10-24 基线为 8 项全部通过；2026-10-25 修复复核另见测试报告。详见：
 
 - `docs/TEST-REPORT.md`
 - `tests/e2e/test-output.txt`

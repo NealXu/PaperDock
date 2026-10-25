@@ -81,6 +81,9 @@ namespace PaperDock
         private readonly Image[] _convertImages = new Image[3];
         private readonly TextBlock[] _convertPlaceholders = new TextBlock[3];
         private readonly RadioButton[] _convertTargets = new RadioButton[3];
+        private RadioButton _wordModeFidelity;
+        private RadioButton _wordModeEditable;
+        private StackPanel _wordModePanel;
         private TextBox _convertOutput;
         private ComboBox _convertDpi;
         private CheckBox _convertOcr;
@@ -1434,6 +1437,30 @@ namespace PaperDock
             }
             left.Children.Add(targets);
 
+            _wordModePanel = new StackPanel { Margin = new Thickness(0, 14, 0, 0) };
+            _wordModePanel.Children.Add(FieldLabel("Word 输出方式", 0));
+            var modes = new Grid();
+            modes.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            modes.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            _wordModeEditable = Ui.Segment("可编辑对齐 · 推荐", "word-mode");
+            _wordModeEditable.IsChecked = true;
+            AutomationProperties.SetAutomationId(_wordModeEditable, "WordModeEditable");
+            _wordModeFidelity = Ui.Segment("版式保真 · 图片", "word-mode");
+            AutomationProperties.SetAutomationId(_wordModeFidelity, "WordModeFidelity");
+            _wordModeFidelity.Checked += delegate { UpdateConvertTarget(); };
+            _wordModeEditable.Checked += delegate { UpdateConvertTarget(); };
+            Grid.SetColumn(_wordModeFidelity, 1);
+            modes.Children.Add(_wordModeEditable);
+            modes.Children.Add(_wordModeFidelity);
+            _wordModePanel.Children.Add(new Border
+            {
+                BorderBrush = Ui.Brush("#DCE3EA"),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Child = modes
+            });
+            left.Children.Add(_wordModePanel);
+
             var checkCard = new Border
             {
                 Margin = new Thickness(0, 20, 0, 0),
@@ -1563,19 +1590,31 @@ namespace PaperDock
             return OfficeTarget.Word;
         }
 
+        private WordOutputMode SelectedWordMode()
+        {
+            return _wordModeFidelity.IsChecked == true
+                ? WordOutputMode.Fidelity
+                : WordOutputMode.Editable;
+        }
+
         private void UpdateConvertTarget()
         {
             if (_convertEffect == null) return;
             var target = SelectedOfficeTarget();
+            _wordModePanel.Visibility = target == OfficeTarget.Word
+                ? Visibility.Visible
+                : Visibility.Collapsed;
             var extension = target == OfficeTarget.Word ? ".docx" : target == OfficeTarget.Excel ? ".xlsx" : ".pptx";
             if (_convertSourcePath != null)
             {
                 _convertOutput.Text = PdfEngine.BuildOutputName(_convertSourcePath, extension);
             }
             _convertEffect.Text = target == OfficeTarget.Word
-                ? "Word 会保留文字和图片；复杂分栏、公式和浮动对象可能发生偏移。"
+                ? SelectedWordMode() == WordOutputMode.Fidelity
+                    ? "版式保真：每页作为整页图像写入 Word，外观最接近 PDF，但文字不可编辑。"
+                    : "可编辑对齐：按 PDF 原位置放置文字和图片，复杂公式与矢量图形仍可能简化。"
                 : target == OfficeTarget.Excel
-                    ? "Excel 只可靠还原规则表格；无框表和扫描表格可能拆错行列。"
+                    ? "Excel 仅导出检测到横竖表格线的规则表格；纯文字页会跳过，无表格时明确提示。"
                     : "PPT 每页输出为整页图片，视觉一致，但文字不可编辑。";
         }
 
@@ -1652,7 +1691,8 @@ namespace PaperDock
                     OutputPath = _convertOutput.Text,
                     Target = SelectedOfficeTarget(),
                     Dpi = dpi,
-                    OcrScannedPages = _convertOcr.IsChecked == true
+                    OcrScannedPages = _convertOcr.IsChecked == true,
+                    WordMode = SelectedWordMode()
                 };
                 var progress = new Progress<string>(SetStatus);
                 var output = await Task.Run(() => OfficeEngine.Convert(

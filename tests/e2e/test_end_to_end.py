@@ -8,7 +8,6 @@ import pymupdf
 import pypdfium2 as pdfium
 import pytest
 from docx import Document
-from openpyxl import load_workbook
 from pptx import Presentation
 
 from conftest import OCR_PACK, SAMPLE
@@ -103,7 +102,7 @@ def test_merge_with_per_file_ranges(session, app_helpers):
     helpers.screenshot(win, session.shots / "merge-complete.png")
 
 
-def test_convert_to_word_excel_and_powerpoint(session, app_helpers):
+def test_convert_to_word_and_powerpoint(session, app_helpers):
     win = session.window
     helpers = app_helpers
     win.child_window(auto_id="Navconvert", control_type="Button").invoke()
@@ -111,11 +110,12 @@ def test_convert_to_word_excel_and_powerpoint(session, app_helpers):
 
     targets = [
         ("ConvertWord", "convert-e2e.docx"),
-        ("ConvertExcel", "convert-e2e.xlsx"),
         ("ConvertPowerPoint", "convert-e2e.pptx"),
     ]
     for target_id, name in targets:
         helpers.select_radio(win, target_id)
+        if target_id == "ConvertWord":
+            helpers.select_radio(win, "WordModeEditable")
         output = session.output / name
         helpers.set_text(win, "ConvertOutputPath", str(output))
         helpers.finish_operation(win, "StartConvert", timeout=240)
@@ -123,11 +123,51 @@ def test_convert_to_word_excel_and_powerpoint(session, app_helpers):
 
     text = "\n".join(paragraph.text for paragraph in Document(session.output / "convert-e2e.docx").paragraphs)
     assert "PAGE 1" in text
-    workbook = load_workbook(session.output / "convert-e2e.xlsx", read_only=True)
-    assert workbook.sheetnames == ["P1", "P2", "P3"]
-    assert "PAGE 1" in str(workbook["P1"]["A1"].value)
     assert len(Presentation(session.output / "convert-e2e.pptx").slides) == 3
     helpers.screenshot(win, session.shots / "convert-complete.png")
+
+
+def test_word_fidelity_preserves_a4_pages(session, app_helpers):
+    win = session.window
+    helpers = app_helpers
+    win.child_window(auto_id="Navconvert", control_type="Button").invoke()
+    helpers.wait_status(win, "就绪 · 3 页", 30)
+
+    helpers.select_radio(win, "ConvertWord")
+    fidelity = win.child_window(auto_id="WordModeFidelity", control_type="RadioButton")
+    fidelity.wait("visible", timeout=10)
+    fidelity.click_input()
+    output = session.output / "word-fidelity.docx"
+    helpers.set_text(win, "ConvertOutputPath", str(output))
+    helpers.finish_operation(win, "StartConvert", timeout=240)
+
+    document = Document(output)
+    section = document.sections[0]
+    assert round(section.page_width.pt) == 595
+    assert round(section.page_height.pt) == 842
+    assert len(document.inline_shapes) == 3
+    assert "第 1 页" not in "\n".join(paragraph.text for paragraph in document.paragraphs)
+
+
+def test_editable_word_uses_source_page_size_without_injected_labels(session, app_helpers):
+    win = session.window
+    helpers = app_helpers
+    win.child_window(auto_id="Navconvert", control_type="Button").invoke()
+    helpers.wait_status(win, "就绪 · 3 页", 30)
+
+    helpers.select_radio(win, "ConvertWord")
+    helpers.select_radio(win, "WordModeEditable")
+    output = session.output / "word-editable.docx"
+    helpers.set_text(win, "ConvertOutputPath", str(output))
+    helpers.finish_operation(win, "StartConvert", timeout=240)
+
+    document = Document(output)
+    section = document.sections[0]
+    assert round(section.page_width.pt) == 595
+    assert round(section.page_height.pt) == 842
+    text = "\n".join(paragraph.text for paragraph in document.paragraphs)
+    assert "PAGE 1" in text
+    assert "第 1 页" not in text
 
 
 @pytest.mark.skipif(not OCR_PACK.exists(), reason="offline OCR test pack not available")
@@ -240,6 +280,8 @@ def test_scanned_pdf_to_word_uses_ocr(session, app_helpers, tmp_path):
     helpers.wait_status(win, "就绪 · 1 页", 30)
     win.child_window(auto_id="Navconvert", control_type="Button").invoke()
     helpers.wait_status(win, "就绪 · 1 页", 30)
+    helpers.select_radio(win, "ConvertWord")
+    helpers.select_radio(win, "WordModeEditable")
     output = session.output / "scanned-ocr.docx"
     helpers.set_text(win, "ConvertOutputPath", str(output))
     helpers.finish_operation(win, "StartConvert", timeout=240)

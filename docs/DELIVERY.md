@@ -2,7 +2,7 @@
 
 ## 安装
 
-- 安装包：`release/wpf/PaperDock-Setup-0.2.1.exe`
+- 安装包：`release/wpf/PaperDock-Setup-0.2.6.exe`
 - 大小：3.59 MiB
 - 架构：Windows x64
 - 系统：Windows 10/11，需 .NET Framework 4.8
@@ -11,7 +11,7 @@
 
 如果安装器被本机应用控制策略拦截，可解压便携版：
 
-- `release/wpf/PaperDock-Portable-0.2.1.zip`
+- `release/wpf/PaperDock-Portable-0.2.6.zip`
 - 大小：2.72 MiB
 - 解压后运行 `PaperDock.exe`
 
@@ -26,8 +26,8 @@
 ## SHA-256
 
 ```text
-FE952D40B8738260AB442E9C3564128CEAA3D8B05C48DFCD6ABAA3E3273C6940  PaperDock-Setup-0.2.1.exe
-B108010313CCDB9B8F16349DECDCAB53C6C1451457812F6E5E6A9B4B238CAF9D  PaperDock-Portable-0.2.1.zip
+4AB323FCB2A340147E4C1E8703459BCDC934ABA572E5E961908728ED8593DD5A  PaperDock-Setup-0.2.6.exe
+4C2282DD06C203696C3C9B5B2546883E52ECA3EC0D891C4E3A4BAB7C52AC93C6  PaperDock-Portable-0.2.6.zip
 9A92566F10D7BC24D20BDEF973C5DD981A09A1FBAF623A23BA077910C293011C  Tesseract-5.5-zh-en.ocrpack.zip
 ```
 

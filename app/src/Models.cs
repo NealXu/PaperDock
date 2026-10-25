@@ -26,6 +26,12 @@ namespace PaperDock
         PowerPoint
     }
 
+    internal enum WordOutputMode
+    {
+        Fidelity,
+        Editable
+    }
+
     internal sealed class SplitRequest
     {
         public string SourcePath { get; set; }
@@ -70,6 +76,8 @@ namespace PaperDock
         public OfficeTarget Target { get; set; }
         public int Dpi { get; set; } = 150;
         public bool OcrScannedPages { get; set; } = true;
+        public WordOutputMode WordMode { get; set; } = WordOutputMode.Editable;
+        public bool RenderEditablePageBackground { get; set; } = true;
     }
 
     internal static class PageRange

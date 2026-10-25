@@ -1,5 +1,5 @@
 #define MyAppName "纸坞"
-#define MyAppVersion "0.2.1"
+#define MyAppVersion "0.2.6"
 #define MyAppPublisher "Local Workbench"
 
 [Setup]

@@ -9,6 +9,7 @@ using System.Threading;
 using System.Xml.Linq;
 using UglyToad.PdfPig;
 using UglyToad.PdfPig.Content;
+using UglyToad.PdfPig.DocumentLayoutAnalysis.PageSegmenter;
 using UglyToad.PdfPig.DocumentLayoutAnalysis.TextExtractor;
 
 namespace PaperDock
@@ -22,6 +23,7 @@ namespace PaperDock
         private static readonly XNamespace WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing";
         private static readonly XNamespace A = "http://schemas.openxmlformats.org/drawingml/2006/main";
         private static readonly XNamespace Pic = "http://schemas.openxmlformats.org/drawingml/2006/picture";
+        private static readonly XNamespace WPS = "http://schemas.microsoft.com/office/word/2010/wordprocessingShape";
         private static readonly XNamespace S = "http://schemas.openxmlformats.org/spreadsheetml/2006/main";
         private static readonly XNamespace P = "http://schemas.openxmlformats.org/presentationml/2006/main";
 
@@ -58,7 +60,14 @@ namespace PaperDock
             {
                 if (request.Target == OfficeTarget.Word)
                 {
-                    WriteWord(pages, tempPath, cancellationToken);
+                    if (request.WordMode == WordOutputMode.Fidelity)
+                    {
+                        WriteWordFidelity(request, pages, tempPath, progress, cancellationToken);
+                    }
+                    else
+                    {
+                        WriteWord(request, pages, tempPath, progress, cancellationToken);
+                    }
                 }
                 else if (request.Target == OfficeTarget.Excel)
                 {
@@ -90,20 +99,23 @@ namespace PaperDock
                 {
                     cancellationToken.ThrowIfCancellationRequested();
                     var page = document.GetPage(index + 1);
+                    var words = page.GetWords().ToList();
                     var content = new PageContent
                     {
                         Number = index + 1,
                         Width = (double)page.Width,
                         Height = (double)page.Height,
-                        Text = ContentOrderTextExtractor.GetText(page).Trim(),
-                        Words = page.GetWords().Select(word => new PositionedWord
+                        HasTableLines = HasTableLines(page),
+                        Text = XmlSafe(ContentOrderTextExtractor.GetText(page).Trim()),
+                        Words = words.Select(word => new PositionedWord
                         {
-                            Text = word.Text,
+                            Text = XmlSafe(word.Text),
                             Left = (double)word.BoundingBox.Left,
                             Right = (double)word.BoundingBox.Right,
                             Top = (double)word.BoundingBox.Top,
                             Bottom = (double)word.BoundingBox.Bottom
-                        }).ToList()
+                        }).ToList(),
+                        Lines = ReadLines(page, words)
                     };
 
                     foreach (var image in page.GetImages())
@@ -111,10 +123,56 @@ namespace PaperDock
                         byte[] png;
                         if (image.TryGetPng(out png) && png != null && png.Length > 0)
                         {
-                            content.Images.Add(png);
+                            var bounds = image.BoundingBox;
+                            content.Images.Add(new PdfImageContent
+                            {
+                                Bytes = png,
+                                X = Math.Max(0, (double)bounds.Left),
+                                Y = Math.Max(0, (double)page.Height - (double)bounds.Top),
+                                Width = (double)bounds.Width,
+                                Height = (double)bounds.Height
+                            });
                         }
                     }
                     result.Add(content);
+                }
+            }
+            return result;
+        }
+
+        private static List<PdfLineContent> ReadLines(Page page, IReadOnlyList<Word> words)
+        {
+            var result = new List<PdfLineContent>();
+            foreach (var block in DocstrumBoundingBoxes.Instance.GetBlocks(words))
+            {
+                foreach (var line in block.TextLines)
+                {
+                    if (line.TextOrientation.ToString() != "Horizontal" ||
+                        string.IsNullOrWhiteSpace(line.Text))
+                    {
+                        continue;
+                    }
+                    var letters = line.Words.SelectMany(word => word.Letters).ToList();
+                    var fontSize = letters.Count == 0
+                        ? 10
+                        : letters.Select(letter => letter.PointSize).DefaultIfEmpty(10).Max();
+                    var bold = letters.Count > 0 &&
+                        letters.Count(letter => letter.FontDetails.IsBold) > letters.Count / 2;
+                    var italic = letters.Count > 0 &&
+                        letters.Count(letter => letter.FontDetails.IsItalic) > letters.Count / 2;
+                    var bounds = line.BoundingBox;
+                    result.Add(new PdfLineContent
+                    {
+                        Text = XmlSafe(line.Text),
+                        X = Math.Max(0, (double)bounds.Left),
+                        Y = Math.Max(0, (double)page.Height - (double)bounds.Top),
+                        Width = Math.Max(1, (double)bounds.Width),
+                        Height = Math.Max((double)bounds.Height, fontSize * 1.25),
+                        FontName = ContainsCjk(line.Text) ? "Microsoft YaHei" : "Times New Roman",
+                        FontSize = fontSize,
+                        Bold = bold,
+                        Italic = italic
+                    });
                 }
             }
             return result;
@@ -147,7 +205,10 @@ namespace PaperDock
                         string.Equals(item.file, name, StringComparison.OrdinalIgnoreCase));
                     if (ocrPage != null)
                     {
-                        page.Text = string.Join(Environment.NewLine, ocrPage.lines.Select(line => line.text));
+                        page.Text = XmlSafe(string.Join(
+                            Environment.NewLine,
+                            ocrPage.lines.Select(line => line.text)));
+                        page.Lines = ReadOcrLines(page, ocrPage);
                     }
                 }
             }
@@ -157,88 +218,367 @@ namespace PaperDock
             }
         }
 
+        private static List<PdfLineContent> ReadOcrLines(PageContent page, OcrPage ocrPage)
+        {
+            var result = new List<PdfLineContent>();
+            if (ocrPage.width <= 0 || ocrPage.height <= 0)
+            {
+                return result;
+            }
+            var scaleX = page.Width / ocrPage.width;
+            var scaleY = page.Height / ocrPage.height;
+            foreach (var line in ocrPage.lines.Where(item => !string.IsNullOrWhiteSpace(item.text)))
+            {
+                var words = line.words.Where(item => item.w > 0 && item.h > 0).ToList();
+                if (words.Count == 0)
+                {
+                    continue;
+                }
+                var left = words.Min(word => word.x);
+                var top = words.Min(word => word.y);
+                var right = words.Max(word => word.x + word.w);
+                var bottom = words.Max(word => word.y + word.h);
+                result.Add(new PdfLineContent
+                {
+                    Text = XmlSafe(line.text),
+                    X = left * scaleX,
+                    Y = top * scaleY,
+                    Width = Math.Max(1, (right - left) * scaleX),
+                    Height = Math.Max(6, (bottom - top) * scaleY),
+                    FontName = ContainsCjk(line.text) ? "Microsoft YaHei" : "Times New Roman",
+                    FontSize = Math.Max(6, (bottom - top) * scaleY * 0.8)
+                });
+            }
+            return result;
+        }
+
         private static void WriteWord(
+            ConvertRequest request,
             IReadOnlyList<PageContent> pages,
             string outputPath,
+            IProgress<string> progress,
             CancellationToken cancellationToken)
         {
-            File.Copy(Path.Combine(AppPaths.Assets, "blank.docx"), outputPath, true);
-            using (var archive = ZipFile.Open(outputPath, ZipArchiveMode.Update))
+            var backgroundDirectory = request.RenderEditablePageBackground
+                ? AppPaths.CreateTempDirectory()
+                : null;
+            IReadOnlyDictionary<int, string> backgrounds = null;
+            try
             {
-                var documentXml = ReadXml(archive, "word/document.xml");
-                var body = documentXml.Root.Element(W + "body");
-                var sectionProperties = body.Elements(W + "sectPr").LastOrDefault();
-                body.RemoveNodes();
-
-                var relationships = ReadXml(archive, "word/_rels/document.xml.rels");
-                var nextRelationship = NextRelationshipNumber(relationships);
-                var imageNumber = 0;
-                var drawingId = 1;
-
-                foreach (var page in pages)
+                if (backgroundDirectory != null)
                 {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var heading = new XElement(W + "p",
-                        new XElement(W + "pPr", new XElement(W + "pStyle", new XAttribute(W + "val", "Heading1"))),
-                        Run("第 " + page.Number + " 页"));
-                    body.Add(heading);
+                    progress.Report("正在渲染可编辑页面背景…");
+                    backgrounds = SystemPdfService.RenderPages(
+                        request.SourcePath,
+                        backgroundDirectory,
+                        Enumerable.Range(0, pages.Count),
+                        request.Dpi,
+                        cancellationToken);
+                }
 
-                    if (!string.IsNullOrWhiteSpace(page.Text))
+                File.Copy(Path.Combine(AppPaths.Assets, "blank.docx"), outputPath, true);
+                using (var archive = ZipFile.Open(outputPath, ZipArchiveMode.Update))
+                {
+                    var documentXml = ReadXml(archive, "word/document.xml");
+                    var settingsXml = ReadXml(archive, "word/settings.xml");
+                    ConfigurePrintView(settingsXml);
+                    var body = documentXml.Root.Element(W + "body");
+                    var sectionProperties = body.Elements(W + "sectPr").LastOrDefault();
+                    body.RemoveNodes();
+                    ConfigureWordPage(sectionProperties, pages[0].Width, pages[0].Height, false);
+
+                    var relationships = ReadXml(archive, "word/_rels/document.xml.rels");
+                    var nextRelationship = NextRelationshipNumber(relationships);
+                    var imageNumber = 0;
+                    var drawingId = 1;
+
+                    foreach (var page in pages)
                     {
-                        foreach (var line in page.Text.Replace("\r", string.Empty).Split('\n'))
+                        cancellationToken.ThrowIfCancellationRequested();
+                        var pageFlow = new XElement(W + "p",
+                            new XElement(W + "pPr",
+                                new XElement(W + "spacing",
+                                    new XAttribute(W + "before", 0),
+                                    new XAttribute(W + "after", 0),
+                                    new XAttribute(W + "line", 1),
+                                    new XAttribute(W + "lineRule", "exact"))));
+
+                        if (backgrounds != null)
                         {
-                            if (!string.IsNullOrWhiteSpace(line))
+                            var background = File.ReadAllBytes(backgrounds[page.Number - 1]);
+                            var relationshipId = "rIdImg" + nextRelationship++;
+                            var target = "media/pdf-background-" + page.Number + ".png";
+                            relationships.Root.Add(new XElement(Relationships + "Relationship",
+                                new XAttribute("Id", relationshipId),
+                                new XAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"),
+                                new XAttribute("Target", target)));
+                            AddEntry(archive, "word/" + target, background);
+                            pageFlow.Add(CreateAnchoredImageRun(
+                                background,
+                                relationshipId,
+                                0,
+                                0,
+                                page.Width,
+                                page.Height,
+                                drawingId++));
+                        }
+                        else
+                        {
+                            foreach (var image in page.Images)
                             {
-                                body.Add(new XElement(W + "p", Run(line)));
+                                imageNumber++;
+                                var relationshipId = "rIdImg" + nextRelationship++;
+                                var target = "media/pdf-page-" + imageNumber + ".png";
+                                relationships.Root.Add(new XElement(Relationships + "Relationship",
+                                    new XAttribute("Id", relationshipId),
+                                    new XAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"),
+                                    new XAttribute("Target", target)));
+                                AddEntry(archive, "word/" + target, image.Bytes);
+                                pageFlow.Add(CreateAnchoredImageRun(
+                                    image.Bytes,
+                                    relationshipId,
+                                    image.X,
+                                    image.Y,
+                                    image.Width,
+                                    image.Height,
+                                    drawingId++));
                             }
+                        }
+
+                        foreach (var line in page.Lines)
+                        {
+                            pageFlow.Add(CreateAnchoredTextRun(
+                                line.Text,
+                                line.X,
+                                line.Y,
+                                line.Width,
+                                line.Height,
+                                line.FontName,
+                                line.FontSize,
+                                line.Bold,
+                                line.Italic,
+                                drawingId++,
+                                backgrounds != null));
+                        }
+                        body.Add(pageFlow);
+
+                        if (page.Number < pages.Count)
+                        {
+                            body.Add(new XElement(W + "p", new XElement(W + "r", new XElement(W + "br", new XAttribute(W + "type", "page")))));
                         }
                     }
 
-                    if (page.Images.Count == 0 && string.IsNullOrWhiteSpace(page.Text))
+                    if (sectionProperties != null)
                     {
-                        body.Add(new XElement(W + "p", Run("[本页没有可提取文字或图片]")));
+                        body.Add(sectionProperties);
                     }
+                    WriteXml(archive, "word/document.xml", documentXml);
+                    WriteXml(archive, "word/_rels/document.xml.rels", relationships);
+                    WriteXml(archive, "word/settings.xml", settingsXml);
+                    AddContentTypeDefault(archive, "png", "image/png");
+                }
+            }
+            finally
+            {
+                if (backgroundDirectory != null)
+                {
+                    try { Directory.Delete(backgroundDirectory, true); } catch { }
+                }
+            }
+        }
 
-                    foreach (var imageBytes in page.Images)
+        private static void WriteWordFidelity(
+            ConvertRequest request,
+            IReadOnlyList<PageContent> pages,
+            string outputPath,
+            IProgress<string> progress,
+            CancellationToken cancellationToken)
+        {
+            var temp = AppPaths.CreateTempDirectory();
+            try
+            {
+                progress.Report("正在渲染 Word 页面…");
+                var rendered = SystemPdfService.RenderPages(
+                    request.SourcePath,
+                    temp,
+                    Enumerable.Range(0, pages.Count),
+                    request.Dpi,
+                    cancellationToken);
+
+                File.Copy(Path.Combine(AppPaths.Assets, "blank.docx"), outputPath, true);
+                using (var archive = ZipFile.Open(outputPath, ZipArchiveMode.Update))
+                {
+                    var documentXml = ReadXml(archive, "word/document.xml");
+                    var settingsXml = ReadXml(archive, "word/settings.xml");
+                    ConfigurePrintView(settingsXml);
+                    var body = documentXml.Root.Element(W + "body");
+                    var sectionProperties = body.Elements(W + "sectPr").LastOrDefault();
+                    body.RemoveNodes();
+
+                    // shortcut: one Word section assumes uniform pages; add per-page sections for mixed sizes.
+                    ConfigureWordPage(sectionProperties, pages[0].Width, pages[0].Height, true);
+
+                    var relationships = ReadXml(archive, "word/_rels/document.xml.rels");
+                    var nextRelationship = NextRelationshipNumber(relationships);
+                    for (var index = 0; index < pages.Count; index++)
                     {
-                        imageNumber++;
+                        cancellationToken.ThrowIfCancellationRequested();
+                        progress.Report("正在生成 Word 第 " + (index + 1) + " / " + pages.Count + " 页…");
+                        var imageBytes = File.ReadAllBytes(rendered[index]);
                         var relationshipId = "rIdImg" + nextRelationship++;
-                        var target = "media/pdf-page-" + imageNumber + ".png";
+                        var target = "media/pdf-page-" + (index + 1) + ".png";
                         relationships.Root.Add(new XElement(Relationships + "Relationship",
                             new XAttribute("Id", relationshipId),
                             new XAttribute("Type", "http://schemas.openxmlformats.org/officeDocument/2006/relationships/image"),
                             new XAttribute("Target", target)));
                         AddEntry(archive, "word/" + target, imageBytes);
-                        body.Add(CreateWordImageParagraph(imageBytes, relationshipId, drawingId++));
+                        var paragraph = CreateWordImageParagraph(
+                            imageBytes,
+                            relationshipId,
+                            index + 1,
+                            (long)Math.Round(pages[index].Width * 12700),
+                            (long)Math.Round(pages[index].Height * 12700));
+                        if (index < pages.Count - 1)
+                        {
+                            paragraph.Add(new XElement(W + "r",
+                                new XElement(W + "br", new XAttribute(W + "type", "page"))));
+                        }
+                        body.Add(paragraph);
                     }
 
-                    if (page.Number < pages.Count)
+                    if (sectionProperties != null)
                     {
-                        body.Add(new XElement(W + "p", new XElement(W + "r", new XElement(W + "br", new XAttribute(W + "type", "page")))));
+                        body.Add(sectionProperties);
                     }
+                    WriteXml(archive, "word/document.xml", documentXml);
+                    WriteXml(archive, "word/_rels/document.xml.rels", relationships);
+                    WriteXml(archive, "word/settings.xml", settingsXml);
+                    AddContentTypeDefault(archive, "png", "image/png");
                 }
-
-                if (sectionProperties != null)
-                {
-                    body.Add(sectionProperties);
-                }
-                WriteXml(archive, "word/document.xml", documentXml);
-                WriteXml(archive, "word/_rels/document.xml.rels", relationships);
-                AddContentTypeDefault(archive, "png", "image/png");
             }
+            finally
+            {
+                try { Directory.Delete(temp, true); } catch { }
+            }
+        }
+
+        private static void ConfigureWordPage(
+            XElement sectionProperties,
+            double width,
+            double height,
+            bool zeroMargins)
+        {
+            if (sectionProperties == null)
+            {
+                return;
+            }
+            var pageSize = sectionProperties.Element(W + "pgSz");
+            if (pageSize == null)
+            {
+                pageSize = new XElement(W + "pgSz");
+                sectionProperties.AddFirst(pageSize);
+            }
+            pageSize.SetAttributeValue(W + "w", (int)Math.Round(width * 20));
+            pageSize.SetAttributeValue(W + "h", (int)Math.Round(height * 20));
+            pageSize.SetAttributeValue(W + "orient", width > height ? "landscape" : "portrait");
+
+            var margins = sectionProperties.Element(W + "pgMar");
+            if (margins == null)
+            {
+                margins = new XElement(W + "pgMar");
+                pageSize.AddAfterSelf(margins);
+            }
+            var margin = zeroMargins ? 0 : 1134;
+            margins.SetAttributeValue(W + "top", margin);
+            margins.SetAttributeValue(W + "right", margin);
+            margins.SetAttributeValue(W + "bottom", margin);
+            margins.SetAttributeValue(W + "left", margin);
+            margins.SetAttributeValue(W + "header", 0);
+            margins.SetAttributeValue(W + "footer", 0);
+            margins.SetAttributeValue(W + "gutter", 0);
+        }
+
+        private static void ConfigurePrintView(XDocument settings)
+        {
+            var root = settings.Root;
+            if (root == null)
+            {
+                return;
+            }
+            var view = root.Element(W + "view");
+            if (view == null)
+            {
+                view = new XElement(W + "view", new XAttribute(W + "val", "print"));
+                root.AddFirst(view);
+            }
+            else
+            {
+                view.SetAttributeValue(W + "val", "print");
+            }
+
+            var zoom = root.Element(W + "zoom");
+            if (zoom == null)
+            {
+                zoom = new XElement(W + "zoom");
+                view.AddAfterSelf(zoom);
+            }
+            zoom.SetAttributeValue(W + "percent", "100");
+            zoom.SetAttributeValue(W + "val", null);
         }
 
         private static XElement Run(string text)
         {
             return new XElement(W + "r",
                 new XElement(W + "rPr",
+                    new XElement(W + "sz", new XAttribute(W + "val", 20)),
+                    new XElement(W + "szCs", new XAttribute(W + "val", 20)),
                     new XElement(W + "rFonts",
                         new XAttribute(W + "ascii", "Microsoft YaHei"),
                         new XAttribute(W + "eastAsia", "Microsoft YaHei"))),
-                new XElement(W + "t", new XAttribute(XNamespace.Xml + "space", "preserve"), text ?? string.Empty));
+                new XElement(W + "t",
+                    new XAttribute(XNamespace.Xml + "space", "preserve"),
+                    XmlSafe(text)));
         }
 
-        private static XElement CreateWordImageParagraph(byte[] imageBytes, string relationshipId, int id)
+        private static string XmlSafe(string value)
+        {
+            if (string.IsNullOrEmpty(value))
+            {
+                return string.Empty;
+            }
+            var result = new StringBuilder(value.Length);
+            for (var index = 0; index < value.Length; index++)
+            {
+                var character = value[index];
+                if (char.IsHighSurrogate(character) &&
+                    index + 1 < value.Length &&
+                    char.IsLowSurrogate(value[index + 1]))
+                {
+                    result.Append(character);
+                    result.Append(value[++index]);
+                }
+                else if (character == '\t' || character == '\n' || character == '\r' ||
+                    (character >= 0x20 && character <= 0xD7FF) ||
+                    (character >= 0xE000 && character <= 0xFFFD))
+                {
+                    result.Append(character);
+                }
+            }
+            return result.ToString();
+        }
+
+        private static bool IsCjk(char value)
+        {
+            return (value >= 0x3400 && value <= 0x9FFF) ||
+                (value >= 0xF900 && value <= 0xFAFF);
+        }
+
+        private static XElement CreateWordImageParagraph(
+            byte[] imageBytes,
+            string relationshipId,
+            int id,
+            long? widthEmu = null,
+            long? heightEmu = null)
         {
             long widthPixels;
             long heightPixels;
@@ -249,19 +589,31 @@ namespace PaperDock
                 heightPixels = image.Height;
             }
             const long maxWidthEmu = 5943600;
-            var width = maxWidthEmu;
-            var height = Math.Max(1, (long)(maxWidthEmu * (heightPixels / (double)Math.Max(1, widthPixels))));
+            var width = widthEmu ?? maxWidthEmu;
+            var height = heightEmu ??
+                Math.Max(1, (long)(maxWidthEmu * (heightPixels / (double)Math.Max(1, widthPixels))));
 
             return new XElement(W + "p",
                 new XElement(W + "r",
                     new XElement(W + "drawing",
+                        // WPS ignores DrawingML that relies on default namespace serialization.
+                        new XAttribute(XNamespace.Xmlns + "a", A),
+                        new XAttribute(XNamespace.Xmlns + "pic", Pic),
+                        new XAttribute(XNamespace.Xmlns + "r", R),
+                        new XAttribute(XNamespace.Xmlns + "wp", WP),
                         new XElement(WP + "inline",
                             new XAttribute("distT", "0"),
                             new XAttribute("distB", "0"),
                             new XAttribute("distL", "0"),
                             new XAttribute("distR", "0"),
                             new XElement(WP + "extent", new XAttribute("cx", width), new XAttribute("cy", height)),
+                            new XElement(WP + "effectExtent",
+                                new XAttribute("l", "0"),
+                                new XAttribute("t", "0"),
+                                new XAttribute("r", "0"),
+                                new XAttribute("b", "0")),
                             new XElement(WP + "docPr", new XAttribute("id", id), new XAttribute("name", "PDF image " + id)),
+                            new XElement(WP + "cNvGraphicFramePr"),
                             new XElement(A + "graphic",
                                 new XElement(A + "graphicData",
                                     new XAttribute("uri", "http://schemas.openxmlformats.org/drawingml/2006/picture"),
@@ -280,11 +632,200 @@ namespace PaperDock
                                                 new XElement(A + "avLst"))))))))));
         }
 
+        private static XElement CreateAnchoredImageRun(
+            byte[] imageBytes,
+            string relationshipId,
+            double left,
+            double top,
+            double width,
+            double height,
+            int id)
+        {
+            if (width <= 0 || height <= 0)
+            {
+                using (var stream = new MemoryStream(imageBytes))
+                using (var image = Image.FromStream(stream))
+                {
+                    width = image.Width * 72.0 / 96.0;
+                    height = image.Height * 72.0 / 96.0;
+                }
+            }
+            var cx = Emu(width);
+            var cy = Emu(height);
+            return new XElement(W + "r",
+                CreateAnchoredDrawing(
+                    id,
+                    true,
+                    left,
+                    top,
+                    cx,
+                    cy,
+                    CreatePictureGraphic(relationshipId, id, cx, cy)));
+        }
+
+        private static XElement CreateAnchoredTextRun(
+            string text,
+            double left,
+            double top,
+            double width,
+            double height,
+            string fontName,
+            double fontSize,
+            bool bold,
+            bool italic,
+            int id,
+            bool opaqueBackground)
+        {
+            var cx = Emu(Math.Max(1, width));
+            var cy = Emu(Math.Max(1, height));
+            var halfPoints = (int)Math.Round(Math.Max(4, Math.Min(72, fontSize)) * 2);
+            var textContent = new XElement(W + "txbxContent",
+                new XElement(W + "p",
+                    new XElement(W + "pPr",
+                        new XElement(W + "spacing",
+                            new XAttribute(W + "before", 0),
+                            new XAttribute(W + "after", 0),
+                            new XAttribute(W + "line", 240),
+                            new XAttribute(W + "lineRule", "auto")),
+                        new XElement(W + "jc", new XAttribute(W + "val", "left"))),
+                    new XElement(W + "r",
+                        new XElement(W + "rPr",
+                            new XElement(W + "rFonts", new XAttribute(W + "ascii", fontName)),
+                            bold ? new XElement(W + "b") : null,
+                            italic ? new XElement(W + "i") : null,
+                            new XElement(W + "sz", new XAttribute(W + "val", halfPoints)),
+                            new XElement(W + "szCs", new XAttribute(W + "val", halfPoints))),
+                        new XElement(W + "t",
+                            new XAttribute(XNamespace.Xml + "space", "preserve"),
+                            XmlSafe(text)))));
+            var shape = new XElement(A + "graphic",
+                new XElement(A + "graphicData",
+                    new XAttribute("uri", "http://schemas.microsoft.com/office/word/2010/wordprocessingShape"),
+                    new XElement(WPS + "wsp",
+                        new XElement(WPS + "cNvSpPr", new XAttribute("txBox", "1")),
+                        new XElement(WPS + "spPr",
+                            new XElement(A + "xfrm",
+                                new XElement(A + "off", new XAttribute("x", "0"), new XAttribute("y", "0")),
+                                new XElement(A + "ext", new XAttribute("cx", cx), new XAttribute("cy", cy))),
+                            new XElement(A + "prstGeom",
+                                new XAttribute("prst", "rect"),
+                                new XElement(A + "avLst")),
+                            opaqueBackground
+                                ? new XElement(A + "solidFill",
+                                    new XElement(A + "srgbClr", new XAttribute("val", "FFFFFF")))
+                                : new XElement(A + "noFill"),
+                            new XElement(A + "ln", new XElement(A + "noFill"))),
+                        new XElement(WPS + "txbx", textContent),
+                        new XElement(WPS + "bodyPr",
+                            new XAttribute("wrap", "none"),
+                            new XAttribute("lIns", "0"),
+                            new XAttribute("tIns", "0"),
+                            new XAttribute("rIns", "0"),
+                            new XAttribute("bIns", "0"),
+                            new XAttribute("anchor", "t"),
+                            new XAttribute("anchorCtr", "0"),
+                            new XElement(A + "noAutofit")))));
+            return new XElement(W + "r",
+                CreateAnchoredDrawing(id, false, left, top, cx, cy, shape));
+        }
+
+        private static XElement CreateAnchoredDrawing(
+            int id,
+            bool behindDocument,
+            double left,
+            double top,
+            long width,
+            long height,
+            XElement graphic)
+        {
+            return new XElement(W + "drawing",
+                new XAttribute(XNamespace.Xmlns + "w", W),
+                new XAttribute(XNamespace.Xmlns + "a", A),
+                new XAttribute(XNamespace.Xmlns + "pic", Pic),
+                new XAttribute(XNamespace.Xmlns + "r", R),
+                new XAttribute(XNamespace.Xmlns + "wp", WP),
+                new XAttribute(XNamespace.Xmlns + "wps", WPS),
+                new XElement(WP + "anchor",
+                    new XAttribute("distT", "0"),
+                    new XAttribute("distB", "0"),
+                    new XAttribute("distL", "0"),
+                    new XAttribute("distR", "0"),
+                    new XAttribute("simplePos", "0"),
+                    new XAttribute("relativeHeight", 251659264L + id),
+                    new XAttribute("behindDoc", behindDocument ? "1" : "0"),
+                    new XAttribute("locked", "0"),
+                    new XAttribute("layoutInCell", "1"),
+                    new XAttribute("allowOverlap", "1"),
+                    new XElement(WP + "simplePos", new XAttribute("x", "0"), new XAttribute("y", "0")),
+                    new XElement(WP + "positionH",
+                        new XAttribute("relativeFrom", "page"),
+                        new XElement(WP + "posOffset", Emu(left))),
+                    new XElement(WP + "positionV",
+                        new XAttribute("relativeFrom", "page"),
+                        new XElement(WP + "posOffset", Emu(top))),
+                    new XElement(WP + "extent", new XAttribute("cx", width), new XAttribute("cy", height)),
+                    new XElement(WP + "effectExtent",
+                        new XAttribute("l", "0"),
+                        new XAttribute("t", "0"),
+                        new XAttribute("r", "0"),
+                        new XAttribute("b", "0")),
+                    new XElement(WP + "wrapNone"),
+                    new XElement(WP + "docPr",
+                        new XAttribute("id", id),
+                        new XAttribute("name", "PDF object " + id)),
+                    new XElement(WP + "cNvGraphicFramePr"),
+                    graphic));
+        }
+
+        private static XElement CreatePictureGraphic(
+            string relationshipId,
+            int id,
+            long width,
+            long height)
+        {
+            return new XElement(A + "graphic",
+                new XElement(A + "graphicData",
+                    new XAttribute("uri", "http://schemas.openxmlformats.org/drawingml/2006/picture"),
+                    new XElement(Pic + "pic",
+                        new XElement(Pic + "nvPicPr",
+                            new XElement(Pic + "cNvPr",
+                                new XAttribute("id", id),
+                                new XAttribute("name", "PDF image " + id)),
+                            new XElement(Pic + "cNvPicPr")),
+                        new XElement(Pic + "blipFill",
+                            new XElement(A + "blip", new XAttribute(R + "embed", relationshipId)),
+                            new XElement(A + "stretch", new XElement(A + "fillRect"))),
+                        new XElement(Pic + "spPr",
+                            new XElement(A + "xfrm",
+                                new XElement(A + "off", new XAttribute("x", "0"), new XAttribute("y", "0")),
+                                new XElement(A + "ext", new XAttribute("cx", width), new XAttribute("cy", height))),
+                            new XElement(A + "prstGeom",
+                                new XAttribute("prst", "rect"),
+                                new XElement(A + "avLst"))))));
+        }
+
+        private static long Emu(double points)
+        {
+            return (long)Math.Round(points * 12700);
+        }
+
+        private static bool ContainsCjk(string value)
+        {
+            return !string.IsNullOrEmpty(value) && value.Any(IsCjk);
+        }
+
         private static void WriteExcel(
             IReadOnlyList<PageContent> pages,
             string outputPath,
             CancellationToken cancellationToken)
         {
+            var tablePages = pages.Where(page => page.HasTableLines).ToList();
+            if (tablePages.Count == 0)
+            {
+                throw new InvalidOperationException(
+                    "未检测到规则表格。可选择 Word 版式保真或 PPT 进行视觉转换。");
+            }
+
             File.Copy(Path.Combine(AppPaths.Assets, "blank.xlsx"), outputPath, true);
             using (var archive = ZipFile.Open(outputPath, ZipArchiveMode.Update))
             {
@@ -303,14 +844,14 @@ namespace PaperDock
                 }
                 var nextRelationship = NextRelationshipNumber(relationships);
 
-                for (var pageIndex = 0; pageIndex < pages.Count; pageIndex++)
+                for (var pageIndex = 0; pageIndex < tablePages.Count; pageIndex++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var page = pages[pageIndex];
+                    var page = tablePages[pageIndex];
                     var sheetNumber = pageIndex + 1;
                     var relationId = "rId" + nextRelationship++;
                     sheets.Add(new XElement(workbookNs + "sheet",
-                        new XAttribute("name", "P" + page.Number),
+                        new XAttribute("name", "表" + sheetNumber),
                         new XAttribute("sheetId", sheetNumber),
                         new XAttribute("state", "visible"),
                         new XAttribute(R + "id", relationId)));
@@ -336,6 +877,31 @@ namespace PaperDock
             }
         }
 
+        private static bool HasTableLines(Page page)
+        {
+            // shortcut: only axis-aligned ruled tables are detected; add layout-model fallback for borderless tables.
+            var horizontal = 0;
+            var vertical = 0;
+            foreach (var path in page.Paths)
+            {
+                var bounds = path.GetBoundingRectangle();
+                if (!bounds.HasValue)
+                {
+                    continue;
+                }
+                var rectangle = bounds.Value;
+                if (rectangle.Width >= 30 && rectangle.Height <= 2)
+                {
+                    horizontal++;
+                }
+                else if (rectangle.Height >= 20 && rectangle.Width <= 2)
+                {
+                    vertical++;
+                }
+            }
+            return horizontal >= 2 && vertical >= 2;
+        }
+
         private static XDocument CreateWorksheet(PageContent page)
         {
             var rows = ExtractRows(page);
@@ -349,7 +915,7 @@ namespace PaperDock
                     row.Add(new XElement(S + "c",
                         new XAttribute("r", cellReference),
                         new XAttribute("t", "inlineStr"),
-                        new XElement(S + "is", new XElement(S + "t", rows[rowIndex][columnIndex] ?? string.Empty))));
+                        new XElement(S + "is", new XElement(S + "t", XmlSafe(rows[rowIndex][columnIndex])))));
                 }
                 sheetData.Add(row);
             }
@@ -683,9 +1249,33 @@ namespace PaperDock
             public int Number { get; set; }
             public double Width { get; set; }
             public double Height { get; set; }
+            public bool HasTableLines { get; set; }
             public string Text { get; set; }
-            public List<byte[]> Images { get; } = new List<byte[]>();
+            public List<PdfLineContent> Lines { get; set; } = new List<PdfLineContent>();
+            public List<PdfImageContent> Images { get; } = new List<PdfImageContent>();
             public List<PositionedWord> Words { get; set; }
+        }
+
+        private sealed class PdfLineContent
+        {
+            public string Text { get; set; }
+            public double X { get; set; }
+            public double Y { get; set; }
+            public double Width { get; set; }
+            public double Height { get; set; }
+            public string FontName { get; set; }
+            public double FontSize { get; set; }
+            public bool Bold { get; set; }
+            public bool Italic { get; set; }
+        }
+
+        private sealed class PdfImageContent
+        {
+            public byte[] Bytes { get; set; }
+            public double X { get; set; }
+            public double Y { get; set; }
+            public double Width { get; set; }
+            public double Height { get; set; }
         }
 
         private sealed class PositionedWord
